@@ -35,6 +35,19 @@ Patch confirmed recipes:
 python3 juce8_megapatcher.py
 ```
 
+Choose plugins interactively:
+
+```bash
+python3 juce8_megapatcher.py --select
+```
+
+Add `--dry-run` first to preview what the selected recipes would patch:
+
+```bash
+python3 juce8_megapatcher.py --select --dry-run
+```
+
+
 Dry-run every known recipe, including experimental ones:
 
 ```bash
@@ -60,6 +73,15 @@ python3 juce8_megapatcher.py \
   --plugin filterverse \
   --path 'filterverse=/custom/path/Filterverse.vst3'
 ```
+
+Probe an arbitrary VST3/DLL without writing anything:
+
+```bash
+python3 juce8_megapatcher.py --probe '/path/to/Some Plugin.vst3'
+```
+
+Probe mode is for trying unknown plugins safely. It prints the file hash, any JUCE version strings, and known patch signatures that match. It never writes the plugin. Open an issue with the probe output if you want a new recipe added.
+
 
 Backups are written under:
 

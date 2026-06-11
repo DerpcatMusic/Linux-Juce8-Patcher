@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import hashlib
+import re
 import os
 import shutil
 import stat
@@ -109,16 +110,33 @@ def parse_pattern(pattern: str) -> list[int | None]:
 def find_pattern(data: bytes | bytearray, pattern: str) -> list[int]:
     parts = parse_pattern(pattern)
     plen = len(parts)
-    matches: list[int] = []
+    if plen == 0 or len(data) < plen:
+        return []
 
-    for i in range(0, len(data) - plen + 1):
+    anchor_index = next((i for i, part in enumerate(parts) if part is not None), None)
+    if anchor_index is None:
+        return list(range(0, len(data) - plen + 1))
+
+    anchor = parts[anchor_index]
+    assert anchor is not None
+
+    matches: list[int] = []
+    start = 0
+    while True:
+        anchor_pos = data.find(bytes([anchor]), start)
+        if anchor_pos < 0:
+            return matches
+
+        candidate = anchor_pos - anchor_index
+        start = anchor_pos + 1
+        if candidate < 0 or candidate + plen > len(data):
+            continue
+
         for j, expected in enumerate(parts):
-            if expected is not None and data[i + j] != expected:
+            if expected is not None and data[candidate + j] != expected:
                 break
         else:
-            matches.append(i)
-
-    return matches
+            matches.append(candidate)
 
 
 def find_c_string(data: bytes | bytearray, text: str) -> list[int]:
@@ -504,6 +522,121 @@ RECIPES: dict[str, PluginRecipe] = {
 }
 
 
+PROBE_PATCHERS: list[Callable[[bytearray, PEImage], PatchOutcome]] = [
+    patch_create_new_peer_engine_zero,
+    patch_create_new_peer_engine_zero_temperance,
+    patch_create_new_peer_engine_zero_kick,
+    patch_native_image_r14_null,
+    patch_native_image_rsi_null,
+    patch_native_image_rsi_null_kick,
+    patch_set_rendering_engine_movsxd,
+    patch_set_rendering_engine_movsxd_kick,
+    patch_set_rendering_engine_mov,
+    patch_renderer_descriptor_to_gdi,
+    patch_inline_d2d_context_to_gdi,
+    patch_d3d11_create_device_fail,
+    patch_dxgi_create_factory_fail,
+    patch_dcomp_create_device_fail,
+    patch_d2d1_create_factory_fail,
+]
+
+
+def probe_patchers(
+    data: bytes | bytearray,
+    pe: PEImage,
+    patchers: list[Callable[[bytearray, PEImage], PatchOutcome]],
+) -> list[PatchOutcome]:
+    return [patcher(bytearray(data), pe) for patcher in patchers]
+
+
+def juce_version_strings(data: bytes | bytearray) -> list[str]:
+    versions: list[str] = []
+    for match in re.finditer(rb"JUCE v\d+(?:\.\d+)+", bytes(data)):
+        text = match.group(0).decode("ascii")
+        if text not in versions:
+            versions.append(text)
+    return versions
+
+
+def probe_one(path: Path) -> int:
+    print(f"\n== Probe {path} ==")
+    if not path.exists():
+        print("missing: file does not exist")
+        return 1
+
+    data = path.read_bytes()
+    try:
+        pe = PEImage(data)
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return 1
+
+    print(f"sha256: {hashlib.sha256(data).hexdigest()}")
+    versions = juce_version_strings(data)
+    if versions:
+        print("juce: " + ", ".join(versions))
+    else:
+        print("juce: no JUCE version string found")
+
+    outcomes = probe_patchers(data, pe, PROBE_PATCHERS)
+    hits = [outcome for outcome in outcomes if outcome.status in {"patched", "already"}]
+    if not hits:
+        print("probe: no known patch signatures matched")
+        return 0
+
+    print("probe: matching known patch signatures")
+    for outcome in hits:
+        suffix = f" - {outcome.detail}" if outcome.detail else ""
+        print(f"{outcome.status:8} {outcome.description}{suffix}")
+    return 0
+
+
+def probe_paths(paths: list[Path]) -> int:
+    rc = 0
+    for path in paths:
+        rc |= probe_one(path.expanduser())
+    return rc
+
+def parse_selection(raw: str, slugs: list[str]) -> set[str]:
+    text = raw.strip().lower()
+    if text == "all":
+        return set(slugs)
+    if text in {"", "none", "q", "quit"}:
+        return set()
+
+    selected: set[str] = set()
+    for part in text.replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            index = int(part)
+        except ValueError as exc:
+            raise ValueError(f"invalid selection: {part}") from exc
+        if index < 1 or index > len(slugs):
+            raise ValueError(f"selection out of range: {index}")
+        selected.add(slugs[index - 1])
+    return selected
+
+
+def select_plugins(overrides: dict[str, Path]) -> set[str]:
+    slugs = sorted(RECIPES)
+    print("Known plugin recipes:")
+    for index, slug in enumerate(slugs, start=1):
+        recipe = RECIPES[slug]
+        path = overrides.get(slug, recipe.default_path)
+        marker = "found" if path.exists() else "missing"
+        print(f"{index:2d}. {slug:16} {recipe.status:17} {marker:7} {recipe.display_name}")
+
+    while True:
+        raw = input("\nSelect plugins to patch (e.g. 1,3 or all; empty to cancel): ")
+        try:
+            return parse_selection(raw, slugs)
+        except ValueError as exc:
+            print(f"error: {exc}")
+
+
+
+
 def status_allowed(recipe: PluginRecipe, args: argparse.Namespace, explicit: bool) -> bool:
     if explicit:
         return True
@@ -606,6 +739,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--include-experimental", action="store_true", help="include recipes marked experimental")
     parser.add_argument("--plugin", action="append", choices=sorted(RECIPES), help="patch only this plugin slug; can repeat")
     parser.add_argument("--path", action="append", default=[], help="override plugin path: slug=/path/to/binary")
+    parser.add_argument("--select", action="store_true", help="show an interactive plugin picker before patching")
+    parser.add_argument("--probe", action="append", type=Path, help="scan an arbitrary plugin binary for known signatures without writing")
     parser.add_argument("--backup-root", type=Path, default=DEFAULT_BACKUP_ROOT, help="directory for backups")
     args = parser.parse_args(argv)
 
@@ -613,10 +748,20 @@ def main(argv: list[str]) -> int:
         for slug, recipe in RECIPES.items():
             print(f"{slug:14} {recipe.status:12} {recipe.display_name}")
         return 0
+    if args.probe:
+        return probe_paths(args.probe)
 
     overrides = parse_path_overrides(args.path)
     explicit = set(args.plugin or [])
-    selected = explicit or set(RECIPES)
+    if args.select:
+        selected = select_plugins(overrides)
+        explicit = set(selected)
+    else:
+        selected = explicit or set(RECIPES)
+
+    if args.select and not selected:
+        print("no plugins selected")
+        return 0
 
     skipped = []
     rc = 0
