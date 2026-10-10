@@ -2,6 +2,16 @@
 
 Fix white or broken JUCE 8 Windows VST3 plugin editors on Linux/Wine/yabridge by applying known-safe binary patches.
 
+<!-- derpcat-support -->
+<p align="center">
+  <a href="https://www.patreon.com/derpcatmusic">
+    <img src=".github/support-derpcat.svg" alt="Donate to Derpcat on Patreon — support my open-source work and help me keep building and maintaining free tools." width="800">
+  </a>
+  <br>
+  <a href="https://www.patreon.com/derpcatmusic"><strong>❤️ Support me on Patreon</strong></a>
+</p>
+<!-- /derpcat-support -->
+
 This tool patches **specific known plugin builds**. It is not a blind patch-everything tool.
 
 ## Safety rules
